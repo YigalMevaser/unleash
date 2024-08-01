@@ -1,0 +1,91 @@
+# trigger:
+# - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- name: AWS_ACCESS_KEY_ID
+  value: $(awsAccessKeyId)
+- name: AWS_SECRET_ACCESS_KEY
+  value: $(awsSecretAccessKey)
+- group: aws
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildAndPush
+    steps:
+    - checkout: self
+    - task: Docker@2
+      displayName: 'Build Docker image'
+      inputs:
+        command: build
+        repository: unleash-repo
+        dockerfile: $(Build.SourcesDirectory)/Dockerfile
+        tags: |
+          latest
+    - script: |
+       aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $(awsAccountId).dkr.ecr.eu-central-1.amazonaws.com
+       docker tag unleash-repo:latest $(awsAccountId).dkr.ecr.eu-central-1.amazonaws.com/unleash-repo:latest
+       docker push $(awsAccountId).dkr.ecr.eu-central-1.amazonaws.com/unleash-repo:latest
+      displayName: 'Push image to ECR'
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+        awsAccountId: $(awsAccountId)
+
+- stage: IaC
+  dependsOn: Build
+  jobs:
+  - job: DeployToAWS
+    steps:
+    - checkout: self
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Install Terraform'
+    - task: TerraformCLI@0
+      displayName: 'Terraform Init'
+      inputs:
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+    - task: TerraformCLI@0
+      displayName: 'Terraform Plan'
+      inputs:
+        command: 'plan'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+    - task: TerraformCLI@0
+      displayName: 'Terraform Apply'
+      inputs:
+        command: 'apply'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+        commandOptions: '-auto-approve'
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+- stage: Destroy
+  dependsOn: IaC
+  condition: and(succeeded(), eq(variables['Build.Reason'], 'Manual'))
+  jobs:
+  - job: DestroyInfrastructure
+    displayName: 'Destroy Infrastructure'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+    - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+      displayName: 'Install Terraform'
+    - task: TerraformCLI@0
+      displayName: 'Terraform Init for Destroy'
+      inputs:
+        command: 'init'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+    - task: TerraformCLI@0
+      displayName: 'Terraform Destroy'
+      inputs:
+        command: 'destroy'
+        workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+        commandOptions: '-auto-approve'
+      env:
+        AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+        AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
